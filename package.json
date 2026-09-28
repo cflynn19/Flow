@@ -1,0 +1,37 @@
+{
+  "name": "flow",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Open-source visual debugger for asynchronous workflows and agent systems",
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "e2e"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "npm run dev -w @flow/api",
+    "dev:web": "npm run dev -w @flow/web",
+    "build": "npm run build -w @flow/web",
+    "start": "npm run start -w @flow/api",
+    "db:generate": "npm run db:generate -w @flow/api",
+    "db:migrate": "npm run db:migrate -w @flow/api",
+    "db:push": "npm run db:push -w @flow/api",
+    "db:seed": "npm run db:seed -w @flow/api",
+    "db:reset": "npm run db:reset -w @flow/api",
+    "test": "npm run test -w @flow/api && npm run test -w @flow/web",
+    "test:api": "npm run test -w @flow/api",
+    "test:web": "npm run test -w @flow/web",
+    "test:e2e": "npm run test -w @flow/e2e",
+    "typecheck": "npm run typecheck -w @flow/shared && npm run typecheck -w @flow/api && npm run typecheck -w @flow/web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
