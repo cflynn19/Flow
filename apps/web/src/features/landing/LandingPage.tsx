@@ -6,8 +6,7 @@ import { Button } from '@/components/ui/button';
 import { useAuth } from '@/features/auth/AuthContext';
 import { LandingDemo } from './LandingDemo';
 
-// Swap YOUR_USERNAME for the real owner once the repo is public.
-const REPO_URL = 'https://github.com/YOUR_USERNAME/flow';
+const REPO_URL = 'https://github.com/cflynn19/Flow';
 
 const POINTS = [
   {

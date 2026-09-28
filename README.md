@@ -112,7 +112,7 @@ the keyboard.
 **Requirements:** Node 20+ and PostgreSQL 16+.
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/flow.git && cd flow
+git clone https://github.com/cflynn19/Flow.git && cd Flow
 npm install
 
 # macOS; see "Database setup" below for Docker
