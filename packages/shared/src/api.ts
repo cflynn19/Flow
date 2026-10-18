@@ -27,10 +27,18 @@ export type PublicUser = z.infer<typeof publicUserSchema>;
 
 /* ----------------------------------------------------------- workflows ---- */
 
+/**
+ * `editor` workflows are drawn by hand and run by Flow's own engine. `external` ones are
+ * reported by another app through the ingest API, and their graph is built from the runs.
+ */
+export const workflowSourceSchema = z.enum(['editor', 'external']);
+export type WorkflowSource = z.infer<typeof workflowSourceSchema>;
+
 export const workflowSummarySchema = z.object({
   id: z.string(),
   name: z.string(),
   description: z.string().nullable(),
+  source: workflowSourceSchema,
   nodeCount: z.number().int(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -43,6 +51,7 @@ export const workflowSchema = z.object({
   id: z.string(),
   name: z.string(),
   description: z.string().nullable(),
+  source: workflowSourceSchema,
   definition: workflowDefinitionSchema,
   createdAt: z.string(),
   updatedAt: z.string(),

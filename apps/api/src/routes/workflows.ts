@@ -12,7 +12,7 @@ import { requireUser } from '../app.ts';
 import { db } from '../db/client.ts';
 import { executions, workflows } from '../db/schema.ts';
 import { startExecution } from '../engine/runner.ts';
-import { notFound } from '../lib/errors.ts';
+import { notFound, unprocessable } from '../lib/errors.ts';
 import { serializeWorkflow } from '../lib/serialize.ts';
 import { parse } from '../lib/validate.ts';
 import { idParamSchema, loadOwnedWorkflow } from './helpers.ts';
@@ -59,6 +59,7 @@ export async function registerWorkflowRoutes(app: FastifyInstance) {
         id: row.id,
         name: row.name,
         description: row.description,
+        source: row.source,
         nodeCount: row.definition.nodes.length,
         createdAt: row.createdAt.toISOString(),
         updatedAt: row.updatedAt.toISOString(),
@@ -106,7 +107,12 @@ export async function registerWorkflowRoutes(app: FastifyInstance) {
     const user = requireUser(request);
     const { id } = parse(idParamSchema, request.params);
     const input = parse(updateWorkflowInputSchema, request.body);
-    await loadOwnedWorkflow(id, user.id);
+    const existing = await loadOwnedWorkflow(id, user.id);
+    // A reported workflow's graph comes from its runs, and its name is how the app
+    // addresses it -- changing either here would silently detach the two.
+    if (existing.source === 'external' && (input.definition !== undefined || input.name !== undefined)) {
+      throw unprocessable('This workflow is reported by an external app; only its description can be edited');
+    }
 
     const [row] = await db
       .update(workflows)
@@ -136,6 +142,9 @@ export async function registerWorkflowRoutes(app: FastifyInstance) {
     const { id } = parse(idParamSchema, request.params);
     const input = parse(executeWorkflowInputSchema, request.body ?? {});
     const workflow = await loadOwnedWorkflow(id, user.id);
+    if (workflow.source === 'external') {
+      throw unprocessable('This workflow is reported by an external app, so Flow cannot run it');
+    }
 
     // Returns as soon as the execution row exists so the client can subscribe to the
     // event stream immediately; the run itself continues in the background.

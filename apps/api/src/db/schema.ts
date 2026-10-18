@@ -4,6 +4,7 @@ import type {
   ExecutionStats,
   NodeError,
   WorkflowDefinition,
+  WorkflowSource,
 } from '@flow/shared';
 import { relations, sql } from 'drizzle-orm';
 import {
@@ -53,11 +54,19 @@ export const workflows = pgTable(
       .references(() => users.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
     description: text('description'),
+    /** `external` workflows are reported through the ingest API rather than drawn. */
+    source: text('source').$type<WorkflowSource>().notNull().default('editor'),
     definition: jsonb('definition').$type<WorkflowDefinition>().notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('workflows_user_id_idx').on(t.userId, t.updatedAt.desc())],
+  (t) => [
+    index('workflows_user_id_idx').on(t.userId, t.updatedAt.desc()),
+    // Reported workflows are addressed by name, so a name must map to exactly one.
+    uniqueIndex('workflows_external_name_unique')
+      .on(t.userId, t.name)
+      .where(sql`${t.source} = 'external'`),
+  ],
 );
 
 export const executions = pgTable(
@@ -85,10 +94,15 @@ export const executions = pgTable(
     error: jsonb('error').$type<NodeError>(),
     stats: jsonb('stats').$type<ExecutionStats>(),
     anomalies: jsonb('anomalies').$type<Anomaly[]>().notNull().default(sql`'[]'::jsonb`),
+    /** The reporting app's run id. Null for runs Flow's own engine executed. */
+    externalId: text('external_id'),
+    /** Last time a reported run heard from its app; drives the idle timeout. */
+    lastEventAt: timestamp('last_event_at', { withTimezone: true }),
   },
   (t) => [
     index('executions_workflow_idx').on(t.workflowId, t.startedAt.desc()),
     index('executions_user_idx').on(t.userId, t.startedAt.desc()),
+    uniqueIndex('executions_external_id_unique').on(t.userId, t.externalId),
   ],
 );
 
@@ -118,6 +132,11 @@ export const nodeExecutions = pgTable(
     /** Nth activation of this nodeId inside the run. Feeds repeated-execution detection. */
     activationIndex: integer('activation_index').notNull().default(0),
     toolCalls: integer('tool_calls').notNull().default(0),
+    /**
+     * Start of the attempt in flight. Only reported runs need it: their attempts arrive
+     * across separate requests, while the engine times an attempt within one call.
+     */
+    attemptStartedAt: timestamp('attempt_started_at', { withTimezone: true }),
   },
   (t) => [
     index('node_executions_execution_idx').on(t.executionId),
@@ -140,6 +159,30 @@ export const executionEvents = pgTable(
     payload: jsonb('payload').notNull(),
   },
   (t) => [uniqueIndex('execution_events_seq_unique').on(t.executionId, t.seq)],
+);
+
+/**
+ * Credentials for apps that report runs. Only a SHA-256 of the key is stored: the key is
+ * random and high-entropy, so a slow hash like bcrypt would add latency to every ingest
+ * request without adding any protection.
+ */
+export const apiKeys = pgTable(
+  'api_keys',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    tokenHash: text('token_hash').notNull(),
+    prefix: text('prefix').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex('api_keys_token_hash_unique').on(t.tokenHash),
+    index('api_keys_user_id_idx').on(t.userId),
+  ],
 );
 
 /* ------------------------------------------------------------ relations ---- */
@@ -180,3 +223,4 @@ export type WorkflowRow = typeof workflows.$inferSelect;
 export type ExecutionRow = typeof executions.$inferSelect;
 export type NodeExecutionRow = typeof nodeExecutions.$inferSelect;
 export type ExecutionEventRow = typeof executionEvents.$inferSelect;
+export type ApiKeyRow = typeof apiKeys.$inferSelect;

@@ -14,7 +14,7 @@ export async function getApp(): Promise<FastifyInstance> {
 /** Specs share one database, so each one starts from a clean slate. */
 export async function truncateAll(): Promise<void> {
   await db.execute(
-    sql`truncate table execution_events, node_executions, executions, workflows, sessions, users restart identity cascade`,
+    sql`truncate table execution_events, node_executions, executions, workflows, api_keys, sessions, users restart identity cascade`,
   );
 }
 

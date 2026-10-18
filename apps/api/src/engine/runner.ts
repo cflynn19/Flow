@@ -1,5 +1,5 @@
 import type { Execution, ExecutionEvent, ExecutionStats } from '@flow/shared';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import {
   executionEvents,
@@ -265,7 +265,7 @@ async function persistNodeExecutions(executionId: string, records: NodeExecution
  * Builds the "what does normal look like" picture from this workflow's recent completed
  * runs. Everything the anomaly rules compare against comes from here.
  */
-async function loadBaseline(workflowId: string, excludeExecutionId: string): Promise<Baseline> {
+export async function loadBaseline(workflowId: string, excludeExecutionId: string): Promise<Baseline> {
   const recent = await db
     .select({ id: executions.id, durationMs: executions.durationMs })
     .from(executions)
@@ -342,7 +342,9 @@ export async function reconcileInterruptedExecutions(): Promise<number> {
       definitionSnapshot: executions.definitionSnapshot,
     })
     .from(executions)
-    .where(eq(executions.status, 'running'));
+    // Reported runs live in the app that reports them, not in this process, so a restart
+    // does not interrupt them. Idle ones are expired by the ingest timeout instead.
+    .where(and(eq(executions.status, 'running'), isNull(executions.externalId)));
 
   if (orphans.length === 0) return 0;
 

@@ -1,5 +1,5 @@
 import { formatDuration, formatRelativeTime } from '@flow/shared';
-import { GitBranch, MoreHorizontal, Play, Plus, Trash2 } from 'lucide-react';
+import { GitBranch, MoreHorizontal, Play, PlugZap, Plus, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -115,15 +115,26 @@ export function WorkflowsPage() {
                   </Link>
                 )}
 
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => void run(workflow.id)}
-                  disabled={runWorkflow.isPending || workflow.nodeCount === 0}
-                >
-                  <Play />
-                  Run
-                </Button>
+                {workflow.source === 'external' ? (
+                  // Reported workflows run in the app that reports them, not here.
+                  <span
+                    className="flex h-7 shrink-0 items-center gap-1.5 px-2 text-[12px] text-text-subtle"
+                    title="Runs are reported by an external app"
+                  >
+                    <PlugZap className="size-3.5" />
+                    Reported
+                  </span>
+                ) : (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => void run(workflow.id)}
+                    disabled={runWorkflow.isPending || workflow.nodeCount === 0}
+                  >
+                    <Play />
+                    Run
+                  </Button>
+                )}
 
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>

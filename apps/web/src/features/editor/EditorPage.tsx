@@ -13,7 +13,7 @@ import {
   type Connection,
   type Edge,
 } from '@xyflow/react';
-import { ArrowLeft, History, Play, Save } from 'lucide-react';
+import { ArrowLeft, History, Play, PlugZap, Save } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -69,6 +69,12 @@ function EditorCanvas() {
     setName(workflow.name);
     setSaved({ definition: workflow.definition, name: workflow.name });
   }, [workflow, setNodes, setEdges]);
+
+  /**
+   * A reported workflow's graph is built from the runs its app sends, so it is shown here
+   * read-only: an edit would be overwritten by the next run, and Flow cannot run it.
+   */
+  const isReported = workflow?.source === 'external';
 
   const definition = useMemo(() => toDefinition(nodes, edges), [nodes, edges]);
   const isDirty =
@@ -177,12 +183,14 @@ function EditorCanvas() {
 
   useHotkey('mod+s', (event) => {
     event.preventDefault();
-    void save();
+    if (!isReported) void save();
   }, { allowInInputs: true });
-  useHotkey('r', () => void run());
+  useHotkey('r', () => {
+    if (!isReported) void run();
+  });
   useHotkey('escape', () => setSelectedId(null));
-  useHotkey('backspace', () => selectedId && deleteNode(selectedId));
-  useHotkey('delete', () => selectedId && deleteNode(selectedId));
+  useHotkey('backspace', () => !isReported && selectedId && deleteNode(selectedId));
+  useHotkey('delete', () => !isReported && selectedId && deleteNode(selectedId));
 
   useUnsavedChanges(
     isDirty,
@@ -214,6 +222,7 @@ function EditorCanvas() {
         <Input
           value={name}
           onChange={(event) => setName(event.target.value)}
+          readOnly={isReported}
           aria-label="Workflow name"
           className="h-7 max-w-72 border-transparent bg-transparent px-1.5 text-[13px] font-medium hover:border-border"
         />
@@ -234,43 +243,55 @@ function EditorCanvas() {
           </Link>
         </Button>
 
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => void save()}
-              disabled={!isDirty || updateWorkflow.isPending}
-            >
-              <Save />
-              Save
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent className="flex items-center gap-1.5">
-            Save <Kbd>{`${MOD_KEY}S`}</Kbd>
-          </TooltipContent>
-        </Tooltip>
+        {isReported ? (
+          <span
+            className="flex items-center gap-1.5 px-2 text-[12px] text-text-subtle"
+            title="This graph is built from the runs an external app reports"
+          >
+            <PlugZap className="size-3.5" />
+            Reported by an external app
+          </span>
+        ) : (
+          <>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void save()}
+                  disabled={!isDirty || updateWorkflow.isPending}
+                >
+                  <Save />
+                  Save
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent className="flex items-center gap-1.5">
+                Save <Kbd>{`${MOD_KEY}S`}</Kbd>
+              </TooltipContent>
+            </Tooltip>
 
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={() => void run()}
-              disabled={runWorkflow.isPending || nodes.length === 0}
-            >
-              <Play />
-              Run
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent className="flex items-center gap-1.5">
-            Run workflow <Kbd>R</Kbd>
-          </TooltipContent>
-        </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => void run()}
+                  disabled={runWorkflow.isPending || nodes.length === 0}
+                >
+                  <Play />
+                  Run
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent className="flex items-center gap-1.5">
+                Run workflow <Kbd>R</Kbd>
+              </TooltipContent>
+            </Tooltip>
+          </>
+        )}
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <NodePalette onAdd={addNode} />
+        {!isReported && <NodePalette onAdd={addNode} />}
 
         <div ref={wrapperRef} className="relative min-w-0 flex-1">
           <ReactFlow
@@ -280,6 +301,8 @@ function EditorCanvas() {
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
+            nodesDraggable={!isReported}
+            nodesConnectable={!isReported}
             isValidConnection={isValidConnection}
             onNodeClick={(_, node) => setSelectedId(node.id)}
             onPaneClick={() => setSelectedId(null)}
@@ -290,7 +313,7 @@ function EditorCanvas() {
             onDrop={(event) => {
               event.preventDefault();
               const kind = event.dataTransfer.getData('application/flow-node') as NodeKind;
-              if (!kind) return;
+              if (!kind || isReported) return;
               addNode(kind, screenToFlowPosition({ x: event.clientX, y: event.clientY }));
             }}
             fitView
@@ -333,7 +356,7 @@ function EditorCanvas() {
           )}
         </div>
 
-        {selected && (
+        {selected && !isReported && (
           <NodeConfigPanel
             node={selected}
             inboundCount={inboundCount}

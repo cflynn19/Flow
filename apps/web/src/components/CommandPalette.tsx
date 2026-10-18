@@ -29,6 +29,8 @@ export function CommandPalette({
 }) {
   const navigate = useNavigate();
   const { data: workflows = [] } = useWorkflows();
+  // Reported workflows run in the app that reports them, so Flow cannot start one.
+  const runnable = workflows.filter((workflow) => workflow.source !== 'external');
   const { data: executionsData } = useExecutions({ limit: 8 });
   const runWorkflow = useRunWorkflow();
   const [search, setSearch] = useState('');
@@ -118,9 +120,9 @@ export function CommandPalette({
             </Group>
           )}
 
-          {workflows.length > 0 && (
+          {runnable.length > 0 && (
             <Group heading="Run">
-              {workflows.map((workflow) => (
+              {runnable.map((workflow) => (
                 <Item
                   key={workflow.id}
                   value={`run execute ${workflow.name}`}

@@ -20,6 +20,7 @@
     "db:push": "npm run db:push -w @flow/api",
     "db:seed": "npm run db:seed -w @flow/api",
     "db:reset": "npm run db:reset -w @flow/api",
+    "api-key": "npm run api-key -w @flow/api --",
     "test": "npm run test -w @flow/api && npm run test -w @flow/web",
     "test:api": "npm run test -w @flow/api",
     "test:web": "npm run test -w @flow/web",

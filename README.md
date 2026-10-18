@@ -12,7 +12,7 @@ and see exactly what happened.
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![Fastify](https://img.shields.io/badge/Fastify-5-000000?logo=fastify&logoColor=white)](https://fastify.dev/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![Tests](https://img.shields.io/badge/tests-76%20passing-3fb950)](#testing)
+[![Tests](https://img.shields.io/badge/tests-97%20passing-3fb950)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 <img src="docs/images/demo.gif" alt="A workflow executing live: nodes move from pending to running to success, a retry fires, and the timeline fills in" width="880">
@@ -40,10 +40,13 @@ Flow answers those questions by making an execution a first-class object you can
 - **Inspect** any node: status, duration, attempt-by-attempt history, input, output, error.
 - **Review** history. Every run is stored with the graph *as it was at the time*.
 
-Node side effects are simulated, so the whole thing runs offline with no external
-services — but the engine underneath is real. Sequential and parallel execution,
-conditional pruning, joins, loops, retries with backoff, and failure propagation all
-genuinely work.
+Workflows you draw in Flow have simulated side effects, so the whole thing runs offline
+with no external services — but the engine underneath is real. Sequential and parallel
+execution, conditional pruning, joins, loops, retries with backoff, and failure
+propagation all genuinely work.
+
+Your own app's workflows can be debugged too: it [reports each step as it
+runs](#reporting-runs-from-your-own-app), and Flow draws the graph from what it sees.
 
 ---
 
@@ -132,6 +135,75 @@ the *Use the demo account* button.
 The seed ships three workflows and fifteen runs that already include failures, retries,
 branch pruning, a reviewer loop, and four kinds of flagged anomaly — so the app looks
 populated the moment it starts.
+
+---
+
+## Reporting runs from your own app
+
+Flow can show the workflows your app already runs: a background job, a serverless
+function, an agent loop. The app reports each step as it happens, and those runs get the
+same live canvas, timeline, inspector and anomaly rules as the ones you draw.
+
+**1. Create an API key** for your account. It is printed once; only a hash is stored.
+
+```bash
+npm run api-key -- demo@flow.dev "My app"
+```
+
+**2. Send events** to `POST /ingest/events` as your code runs. Events sharing a `runId`
+form one run, and the first event for a new `workflow` name creates that workflow.
+
+```bash
+curl -X POST http://localhost:4000/ingest/events \
+  -H "Authorization: Bearer $FLOW_API_KEY" -H "Content-Type: application/json" \
+  -d '{"events": [
+    {"type": "run.started",    "runId": "r-1", "workflow": "deleteAccount", "input": {"userId": "42"}},
+    {"type": "step.started",   "runId": "r-1", "workflow": "deleteAccount", "step": "remove-friends"},
+    {"type": "step.completed", "runId": "r-1", "workflow": "deleteAccount", "step": "remove-friends"},
+    {"type": "run.completed",  "runId": "r-1", "workflow": "deleteAccount"}
+  ]}'
+```
+
+**3. Try the example**, which reports a fake account deletion live, with three parallel
+cleanup steps and a retried storage call:
+
+```bash
+FLOW_API_KEY=flow_... node examples/report-run.mjs
+```
+
+[`examples/report-run.mjs`](examples/report-run.mjs) also contains a ~50-line reporter you
+can copy into your own code.
+
+| Event | Fields (beyond `runId`, `workflow`, optional `ts`) |
+| --- | --- |
+| `run.started` | `input?` |
+| `step.started` | `step`, `label?`, `input?`, `after?: string[]`, `maxAttempts?` |
+| `step.completed` | `step`, `output?` |
+| `step.failed` | `step`, `error: { message, code? }`, `willRetry?`, `retryInMs?` |
+| `run.completed` | — |
+| `run.failed` | `error?` |
+
+**You don't describe the graph.** Each step becomes a node. Its parents are the steps that
+had *finished* before it started, minus any that were themselves followed by another
+finished step. Sequential code draws as a chain, `Promise.all` as a fan-out, and the step
+after it as a join. When timing is ambiguous (two fast steps that look sequential, say),
+`after` names the parents explicitly. A workflow's graph is the union of all its runs, so
+it shows every path the app has taken.
+
+**Retries** are a `step.failed` with `willRetry: true` followed by another `step.started`
+for the same step. They become attempts of one node, exactly like engine retries.
+
+**Runs that go quiet** fail after `INGEST_IDLE_TIMEOUT_MS` (15 minutes by default) with
+`timed_out`, so a crashed process cannot leave a run "running" forever. A step still
+open when its run ends is marked failed with `step_unfinished`.
+
+Reported workflows are read-only in Flow: their graph comes from the app, and Flow cannot
+run them.
+
+> **Current limits:** events are not deduplicated, so a client that retries a request
+> after a timeout can record a step twice. Keys are managed from the command line (or
+> `GET`/`POST`/`DELETE /api-keys`); there is no settings page yet. `npm run db:seed`
+> wipes all data, keys included.
 
 ---
 
@@ -270,15 +342,19 @@ runs, retried runs, and runs that fail outright.
 ```text
 users              id · email · password_hash · name · created_at
 sessions           id (cookie token) · user_id · expires_at
-workflows          id · user_id · name · description · definition(jsonb) · timestamps
+api_keys           id · user_id · name · token_hash · prefix · created_at · last_used_at
+workflows          id · user_id · name · description · source · definition(jsonb)
+                   timestamps
 executions         id · seq · workflow_id · user_id · status · trigger_input(jsonb)
                    definition_snapshot(jsonb) · started_at · completed_at · duration_ms
                    error(jsonb) · stats(jsonb) · anomalies(jsonb)
+                   external_id · last_event_at
 node_executions    id · execution_id · node_id · node_kind · label · status
                    attempt_count · max_attempts · attempts(jsonb)
                    started_at · completed_at · duration_ms
                    input(jsonb) · output(jsonb) · error(jsonb)
                    parent_node_execution_id · branch_depth · activation_index · tool_calls
+                   attempt_started_at
 execution_events   id · execution_id · seq · node_id · type · ts · payload(jsonb)
 ```
 
@@ -340,6 +416,12 @@ GET    /executions/:id/events    the full ordered event log
 GET    /executions/:id/stream    text/event-stream, supports Last-Event-ID
 
 GET    /stats                    dashboard aggregates
+
+GET    /api-keys                 key names and prefixes, never the keys
+POST   /api-keys                 201 + the key, shown this once
+DELETE /api-keys/:id
+
+POST   /ingest/events            202; Authorization: Bearer <api key>
 ```
 
 Every body and parameter is validated with a shared Zod schema. Errors come back in one
@@ -387,12 +469,12 @@ quiet until there are at least three.
 ## Testing
 
 ```bash
-npm test          # Vitest: API (39) + web (23)
+npm test          # Vitest: API (60) + web (23)
 npm run test:e2e  # Playwright (14)
 npm run typecheck # tsc --noEmit across all three workspaces
 ```
 
-**76 tests**, run against a real PostgreSQL rather than a mock — the engine leans on
+**97 tests**, run against a real PostgreSQL rather than a mock — the engine leans on
 `jsonb`, `distinct on` and filtered aggregates.
 
 - **Engine** — sequential ordering and payload threading; parallel branches asserted to
@@ -404,6 +486,11 @@ npm run typecheck # tsc --noEmit across all three workspaces
   past execution still rendering after its workflow is edited; and the SSE stream live,
   replayed for a late subscriber, and resumed from `Last-Event-ID` with the combined
   sequence asserted gap-free.
+- **Ingest** — API key auth and revocation; graph inference for chains, fan-out and
+  fan-in, including across separate requests; explicit `after`; retries as attempts;
+  exhausted retries flagged; unfinished steps; late events ignored; per-account run
+  isolation; live broadcast continuing the sequence; idle timeout, and restarts leaving
+  reported runs alone.
 - **Web** — the execution reducer through `running → failed → retrying → success`,
   duplicate suppression, multi-activation loops; canvas node rendering for every status;
   the canvas↔definition round trip.

@@ -103,6 +103,8 @@ export const executionSchema = z.object({
   seq: z.number().int(),
   workflowId: z.string(),
   workflowName: z.string(),
+  /** The reporting app's own id for this run; null for runs Flow executed itself. */
+  externalRunId: z.string().nullable(),
   status: executionStatusSchema,
   triggerInput: z.unknown().nullable(),
   startedAt: z.string(),

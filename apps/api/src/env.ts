@@ -11,6 +11,8 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required -- see README "Database setup"'),
   /** Comma-separated list of origins allowed to send credentialed requests. */
   WEB_ORIGIN: z.string().default('http://localhost:5173'),
+  /** A reported run that sends nothing for this long is marked failed. */
+  INGEST_IDLE_TIMEOUT_MS: z.coerce.number().int().min(10_000).default(15 * 60_000),
   COOKIE_SECURE: z
     .string()
     .optional()

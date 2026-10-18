@@ -51,7 +51,7 @@ async function main() {
   console.log('Seeding Flow…');
 
   await db.execute(
-    sql`truncate table execution_events, node_executions, executions, workflows, sessions, users restart identity cascade`,
+    sql`truncate table execution_events, node_executions, executions, workflows, api_keys, sessions, users restart identity cascade`,
   );
 
   const [user] = await db

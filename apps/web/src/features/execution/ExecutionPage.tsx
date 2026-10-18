@@ -7,7 +7,7 @@ import {
   ReactFlowProvider,
   type Edge,
 } from '@xyflow/react';
-import { AlertTriangle, ArrowLeft, Pencil, Play, Radio } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Pencil, Play, PlugZap, Radio } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -90,6 +90,27 @@ function ExecutionView() {
   // a second even when no events were arriving. <LiveDuration> owns it instead.
 
   const definition = execution?.definitionSnapshot;
+  // Reported runs are driven by another app, which Flow can neither re-run nor edit.
+  const isReported = execution?.externalRunId != null;
+
+  /*
+   * A reported run has no graph up front -- each new step adds a node as it is reported.
+   * When the stream mentions a node this snapshot does not have, fetch the newer one.
+   */
+  const hasUnknownNode = useMemo(() => {
+    if (!definition) return false;
+    const known = new Set(definition.nodes.map((node) => node.id));
+    return Object.keys(state.byNodeId).some((nodeId) => !known.has(nodeId));
+  }, [definition, state.byNodeId]);
+
+  useEffect(() => {
+    if (hasUnknownNode) void refetch();
+  }, [hasUnknownNode, refetch]);
+
+  // <ReactFlow fitView> only fits on mount, so a graph that grows mid-run would push its
+  // newest steps off-screen. Keying the canvas on the node count remounts it -- and so
+  // refits it, after measuring -- each time a reported run gains a step.
+  const canvasKey = isReported ? (definition?.nodes.length ?? 0) : 0;
 
   // Matches the engine's definition of a repeat: skipped activations do not count, so a
   // node downstream of a loop is not badged "x3" for passes where it never ran.
@@ -196,7 +217,9 @@ function ExecutionView() {
     }
   }, [workflowId, runWorkflow, navigate]);
 
-  useHotkey('r', () => void rerun());
+  useHotkey('r', () => {
+    if (!isReported) void rerun();
+  });
 
   // A finished run's persisted summary may arrive after the stream closes.
   useEffect(() => {
@@ -271,16 +294,29 @@ function ExecutionView() {
           </span>
         )}
 
-        <Button variant="ghost" size="sm" asChild>
-          <Link to={`/app/workflows/${workflowId}`}>
-            <Pencil />
-            Edit
-          </Link>
-        </Button>
-        <Button variant="secondary" size="sm" onClick={() => void rerun()} disabled={runWorkflow.isPending}>
-          <Play />
-          Run again
-        </Button>
+        {isReported ? (
+          <span
+            className="flex min-w-0 items-center gap-1.5 text-[11px] text-text-subtle"
+            title="This run was reported by an external app"
+          >
+            <PlugZap className="size-3 shrink-0" />
+            <span className="hidden sm:inline">Reported</span>
+            <span className="truncate font-mono">{execution.externalRunId}</span>
+          </span>
+        ) : (
+          <>
+            <Button variant="ghost" size="sm" asChild>
+              <Link to={`/app/workflows/${workflowId}`}>
+                <Pencil />
+                Edit
+              </Link>
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => void rerun()} disabled={runWorkflow.isPending}>
+              <Play />
+              Run again
+            </Button>
+          </>
+        )}
       </header>
 
       {runStatus === 'failed' && runError && (
@@ -299,6 +335,7 @@ function ExecutionView() {
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="relative min-h-0 flex-[3]">
             <ReactFlow
+              key={canvasKey}
               nodes={nodes}
               edges={edges}
               nodeTypes={nodeTypes}

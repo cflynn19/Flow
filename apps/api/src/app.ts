@@ -10,8 +10,10 @@ import { ZodError } from 'zod';
 import { env, isProduction } from './env.ts';
 import { SESSION_COOKIE, resolveSession } from './lib/auth.ts';
 import { AppError, unauthorized } from './lib/errors.ts';
+import { registerApiKeyRoutes } from './routes/api-keys.ts';
 import { registerAuthRoutes } from './routes/auth.ts';
 import { registerExecutionRoutes } from './routes/executions.ts';
+import { registerIngestRoutes } from './routes/ingest.ts';
 import { registerStatsRoutes } from './routes/stats.ts';
 import { registerWorkflowRoutes } from './routes/workflows.ts';
 import './types.ts';
@@ -87,6 +89,8 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(registerWorkflowRoutes, { prefix: '/workflows' });
   await app.register(registerExecutionRoutes, { prefix: '/executions' });
   await app.register(registerStatsRoutes, { prefix: '/stats' });
+  await app.register(registerApiKeyRoutes, { prefix: '/api-keys' });
+  await app.register(registerIngestRoutes, { prefix: '/ingest' });
 
   return app;
 }
