@@ -20,21 +20,33 @@ if (!API_KEY) {
 function createRun(workflow, input) {
   const runId = `${workflow}-${Date.now()}`;
 
-  async function send(event) {
-    try {
-      const response = await fetch(`${FLOW_URL}/ingest/events`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${API_KEY}` },
-        body: JSON.stringify({
-          events: [{ runId, workflow, ts: new Date().toISOString(), ...event }],
-        }),
-      });
-      if (!response.ok) console.warn(`Flow rejected ${event.type}:`, await response.text());
-      return response.ok ? response.json() : null;
-    } catch (error) {
-      console.warn(`Could not reach Flow for ${event.type}: ${error.message}`);
-      return null;
+  /**
+   * Every event carries a unique id, so resending one is harmless: Flow skips ids it has
+   * already seen. That is what makes the retry below safe.
+   */
+  async function send(event, attemptsLeft = 3) {
+    const body = JSON.stringify({
+      events: [{ id: crypto.randomUUID(), runId, workflow, ts: new Date().toISOString(), ...event }],
+    });
+    for (let attempt = 1; attempt <= attemptsLeft; attempt += 1) {
+      try {
+        const response = await fetch(`${FLOW_URL}/ingest/events`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${API_KEY}` },
+          body,
+        });
+        if (response.ok) return response.json();
+        // 4xx means the request itself is wrong; sending it again will not help.
+        if (response.status < 500) {
+          console.warn(`Flow rejected ${event.type}:`, await response.text());
+          return null;
+        }
+      } catch (error) {
+        if (attempt === attemptsLeft) console.warn(`Could not reach Flow for ${event.type}: ${error.message}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
     }
+    return null;
   }
 
   return {

@@ -26,8 +26,13 @@ const stepIdSchema = z
 
 const envelope = {
   /**
-   * The caller's own id for this run. Events sharing a runId belong to one execution, so
-   * a run can be reported across as many requests as is convenient.
+   * Optional unique id for this event. An event whose id the run has already seen is
+   * skipped, which makes it safe for a client to resend a batch after a timeout.
+   */
+  id: z.string().trim().min(1).max(200).optional(),
+  /**
+   * The caller's own id for this run. Events sharing a runId *and* workflow belong to one
+   * execution, so a run can be reported across as many requests as is convenient.
    */
   runId: z.string().trim().min(1).max(200),
   /** Workflow name. A workflow is created the first time a name is seen. */
@@ -102,7 +107,11 @@ export const ingestResultSchema = z.object({
   accepted: z.number().int(),
   /** Events that could not be applied, e.g. anything arriving after its run finished. */
   ignored: z.number().int(),
-  runs: z.array(z.object({ runId: z.string(), executionId: z.string(), status: z.string() })),
+  /** Events skipped because their `id` had already been received. */
+  duplicates: z.number().int(),
+  runs: z.array(
+    z.object({ runId: z.string(), workflow: z.string(), executionId: z.string(), status: z.string() }),
+  ),
   warnings: z.array(z.string()),
 });
 export type IngestResult = z.infer<typeof ingestResultSchema>;

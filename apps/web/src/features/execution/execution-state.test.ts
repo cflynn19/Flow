@@ -126,6 +126,21 @@ describe('executionReducer', () => {
     expect(exhausted.byNodeId.sendEmail!.error?.message).toBe('SMTP timeout');
   });
 
+  it('settles a node left awaiting a retry when its attempt is re-reported as final', () => {
+    seq = 0;
+    const state = reduceEvents([
+      started(),
+      nodeStarted(1),
+      nodeFailed(1, false, '2026-01-01T10:00:00.604Z'),
+      nodeRetrying(1, '2026-01-01T10:00:00.604Z'),
+      // The run ended before the retry began, so that attempt was the last one.
+      nodeFailed(1, true, '2026-01-01T10:00:00.604Z'),
+    ]);
+    const node = state.byNodeId.sendEmail!;
+    expect(node.status).toBe('failed');
+    expect(node.attempts).toHaveLength(1);
+  });
+
   it('ignores events it has already applied', () => {
     seq = 0;
     const events = [started(), nodeStarted(1)];

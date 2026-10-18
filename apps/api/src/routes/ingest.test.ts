@@ -369,6 +369,84 @@ describe('reported runs', () => {
   });
 });
 
+describe('delivery edge cases', () => {
+  it('skips events whose id was already received, so a resent batch is harmless', async () => {
+    const client = await signUp();
+    const key = await issueKey(client);
+    const start: Draft[] = [{ id: 'e1', type: 'step.started', step: 'a', ts: at(0) }];
+
+    await report(key, start);
+    const resent = await report(key, start); // the client timed out and tried again
+    expect(resent.json()).toMatchObject({ accepted: 0, duplicates: 1 });
+
+    const done = await report(key, [
+      { id: 'e2', type: 'step.completed', step: 'a', ts: at(5) },
+      { id: 'e2', type: 'step.completed', step: 'a', ts: at(5) },
+      { id: 'e3', type: 'run.completed', ts: at(6) },
+    ]);
+    expect(done.json()).toMatchObject({ accepted: 2, duplicates: 1 });
+
+    const detail = await getExecution(client, done.json().runs[0].executionId);
+    expect(detail.status).toBe('success');
+    expect(detail.nodeExecutions.filter((n) => n.nodeId === 'a')).toMatchObject([{ status: 'success' }]);
+  });
+
+  it('treats the same run id under different workflows as different runs', async () => {
+    const client = await signUp();
+    const key = await issueKey(client);
+    const response = await report(key, [
+      { type: 'step.started', runId: 'evt-1', workflow: 'deleteAccount', step: 'a', ts: at(0) },
+      { type: 'step.started', runId: 'evt-1', workflow: 'addBookByIsbn', step: 'b', ts: at(0) },
+    ]);
+
+    const [first, second] = response.json().runs;
+    expect(first.executionId).not.toBe(second.executionId);
+    const deleteRun = await getExecution(client, first.executionId);
+    expect(deleteRun.workflowName).toBe('deleteAccount');
+    expect(deleteRun.nodeExecutions.map((n) => n.nodeId)).not.toContain('b');
+  });
+
+  it('settles a step left awaiting a retry when the run ends, in the event log too', async () => {
+    const client = await signUp();
+    const key = await issueKey(client);
+    const response = await report(key, [
+      { type: 'step.started', step: 'x', ts: at(0) },
+      { type: 'step.failed', step: 'x', ts: at(10), error: { message: 'boom' }, willRetry: true },
+      { type: 'run.failed', ts: at(20) },
+    ]);
+    const id = response.json().runs[0].executionId;
+
+    // The UI is rebuilt from events, so the last word on the node must be final.
+    const last = (await getEvents(client, id)).filter((e) => e.nodeId === 'x').at(-1)!;
+    expect(last).toMatchObject({ type: 'node.failed', payload: { attempt: 1, retriesExhausted: true } });
+
+    const x = (await getExecution(client, id)).nodeExecutions.find((n) => n.nodeId === 'x')!;
+    expect(x).toMatchObject({ status: 'failed', attemptCount: 1, durationMs: 10 });
+    expect(x.attempts).toHaveLength(1);
+  });
+
+  it('stops recording new steps at the per-run limit and flags it', async () => {
+    const client = await signUp();
+    const key = await issueKey(client);
+    const loop = (from: number): Draft[] =>
+      Array.from({ length: 200 }, (_, i) => {
+        const t = (from + i) * 2;
+        return [
+          { type: 'step.started' as const, step: 'item', ts: at(t) },
+          { type: 'step.completed' as const, step: 'item', ts: at(t + 1) },
+        ];
+      }).flat();
+
+    for (let batch = 0; batch < 6; batch += 1) await report(key, loop(batch * 200));
+    const done = await report(key, [{ type: 'run.completed', ts: at(10_000) }]);
+
+    const detail = await getExecution(client, done.json().runs[0].executionId);
+    // 1000 activations: Start plus 999 of the loop.
+    expect(detail.nodeExecutions).toHaveLength(1000);
+    expect(detail.anomalies.map((a) => a.rule)).toContain('execution-cap-reached');
+  });
+});
+
 describe('idle reported runs', () => {
   it('fails a run that stops reporting, and only that one', async () => {
     const client = await signUp();

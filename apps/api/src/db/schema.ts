@@ -12,6 +12,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   serial,
   text,
   timestamp,
@@ -102,7 +103,8 @@ export const executions = pgTable(
   (t) => [
     index('executions_workflow_idx').on(t.workflowId, t.startedAt.desc()),
     index('executions_user_idx').on(t.userId, t.startedAt.desc()),
-    uniqueIndex('executions_external_id_unique').on(t.userId, t.externalId),
+    // A run id names one run *of one workflow*: an app may reuse ids across functions.
+    uniqueIndex('executions_workflow_external_id_unique').on(t.workflowId, t.externalId),
   ],
 );
 
@@ -159,6 +161,22 @@ export const executionEvents = pgTable(
     payload: jsonb('payload').notNull(),
   },
   (t) => [uniqueIndex('execution_events_seq_unique').on(t.executionId, t.seq)],
+);
+
+/**
+ * Ids of reported events already applied to a run. A client that times out and resends a
+ * batch would otherwise record every step in it twice -- and the duplicate start, never
+ * completed, would end the run as a spurious "step_unfinished" failure.
+ */
+export const ingestEventIds = pgTable(
+  'ingest_event_ids',
+  {
+    executionId: uuid('execution_id')
+      .notNull()
+      .references(() => executions.id, { onDelete: 'cascade' }),
+    eventId: text('event_id').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.executionId, t.eventId] })],
 );
 
 /**

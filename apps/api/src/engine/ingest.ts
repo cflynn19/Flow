@@ -8,11 +8,12 @@ import {
   type NodeError,
   type WorkflowDefinition,
 } from '@flow/shared';
-import { and, eq, isNotNull, lt, max, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, lt, max, sql } from 'drizzle-orm';
 import { db } from '../db/client.ts';
 import {
   executionEvents,
   executions,
+  ingestEventIds,
   nodeExecutions,
   workflows,
   type ExecutionRow,
@@ -23,6 +24,7 @@ import { executionBus } from './bus.ts';
 import { loadBaseline } from './runner.ts';
 import type { NodeExecutionRecord } from './scheduler.ts';
 import {
+  MAX_ACTIVATIONS_PER_RUN,
   MAX_TRACE_NODES,
   inferParents,
   layout,
@@ -67,18 +69,25 @@ export async function ingestEvents(
   receivedAt = new Date(),
 ): Promise<IngestResult> {
   // Order is preserved within a run; runs in one batch are independent of each other.
-  const byRun = new Map<string, IngestEvent[]>();
-  for (const event of events) byRun.set(event.runId, [...(byRun.get(event.runId) ?? []), event]);
+  // A run is identified by workflow *and* runId, since an app may reuse ids across them.
+  const byRun = new Map<string, { workflow: string; runId: string; events: IngestEvent[] }>();
+  for (const event of events) {
+    const key = runKey(userId, event.workflow, event.runId);
+    const group = byRun.get(key) ?? { workflow: event.workflow, runId: event.runId, events: [] };
+    group.events.push(event);
+    byRun.set(key, group);
+  }
 
-  const result: IngestResult = { accepted: 0, ignored: 0, runs: [], warnings: [] };
-  for (const [runId, runEvents] of byRun) {
-    const outcome = await serialised(`${userId}:${runId}`, () =>
-      applyRunEvents(userId, runId, runEvents, receivedAt),
+  const result: IngestResult = { accepted: 0, ignored: 0, duplicates: 0, runs: [], warnings: [] };
+  for (const [key, { workflow, runId, events: runEvents }] of byRun) {
+    const outcome = await serialised(key, () =>
+      applyRunEvents(userId, workflow, runId, runEvents, receivedAt),
     );
     result.accepted += outcome.accepted;
     result.ignored += outcome.ignored;
+    result.duplicates += outcome.duplicates;
     result.warnings.push(...outcome.warnings);
-    result.runs.push({ runId, executionId: outcome.executionId, status: outcome.status });
+    result.runs.push({ runId, workflow, executionId: outcome.executionId, status: outcome.status });
   }
   return result;
 }
@@ -88,23 +97,25 @@ interface RunOutcome {
   status: string;
   accepted: number;
   ignored: number;
+  duplicates: number;
   warnings: string[];
 }
 
 async function applyRunEvents(
   userId: string,
+  workflowName: string,
   runId: string,
   events: IngestEvent[],
   receivedAt: Date,
 ): Promise<RunOutcome> {
   const { session, outcome } = await db.transaction(async (tx) => {
-    let execution = await lockExecution(tx, userId, runId);
+    const workflowId = await ensureWorkflow(tx, userId, workflowName);
+    let execution = await lockExecution(tx, workflowId, runId);
     let created = false;
 
     if (!execution) {
       const first = events[0]!;
       const runStarted = events.find((e) => e.type === 'run.started');
-      const workflowId = await ensureWorkflow(tx, userId, first.workflow);
       const startedAt = timeOf(runStarted ?? first, receivedAt);
 
       await tx
@@ -120,22 +131,26 @@ async function applyRunEvents(
           lastEventAt: receivedAt,
         })
         .onConflictDoNothing();
-      execution = await lockExecution(tx, userId, runId);
+      execution = await lockExecution(tx, workflowId, runId);
       if (!execution) throw new Error(`Could not create execution for run "${runId}"`);
       created = true;
     }
 
-    const session = await RunSession.load(tx, execution, first(events).workflow);
+    const fresh = created ? events : await withoutSeenEvents(tx, execution.id, events);
+    const unique = dedupeWithinBatch(fresh);
+
+    const session = await RunSession.load(tx, execution, workflowName);
     if (created) session.start();
 
     let accepted = 0;
     let ignored = 0;
-    for (const event of events) {
+    for (const event of unique) {
       if (session.apply(event, timeOf(event, receivedAt))) accepted += 1;
       else ignored += 1;
     }
 
     await session.persist(receivedAt);
+    await recordEventIds(tx, execution.id, unique);
     return {
       session,
       outcome: {
@@ -143,6 +158,7 @@ async function applyRunEvents(
         status: session.status,
         accepted,
         ignored,
+        duplicates: events.length - unique.length,
         warnings: session.warnings,
       },
     };
@@ -160,8 +176,14 @@ async function applyRunEvents(
  */
 export async function expireIdleExternalRuns(idleMs: number, now = new Date()): Promise<number> {
   const stale = await db
-    .select({ userId: executions.userId, externalId: executions.externalId })
+    .select({
+      userId: executions.userId,
+      workflowId: executions.workflowId,
+      workflowName: workflows.name,
+      externalId: executions.externalId,
+    })
     .from(executions)
+    .innerJoin(workflows, eq(executions.workflowId, workflows.id))
     .where(
       and(
         eq(executions.status, 'running'),
@@ -174,9 +196,9 @@ export async function expireIdleExternalRuns(idleMs: number, now = new Date()): 
   let expired = 0;
   for (const row of stale) {
     const runId = row.externalId!;
-    const didExpire = await serialised(`${row.userId}:${runId}`, async () => {
+    const didExpire = await serialised(runKey(row.userId, row.workflowName, runId), async () => {
       const session = await db.transaction(async (tx) => {
-        const execution = await lockExecution(tx, row.userId, runId);
+        const execution = await lockExecution(tx, row.workflowId, runId);
         // Re-checked under the lock: an event may have arrived since the scan.
         if (!execution || execution.status !== 'running') return null;
         if (execution.lastEventAt && execution.lastEventAt.getTime() >= now.getTime() - idleMs) {
@@ -214,6 +236,7 @@ class RunSession {
   private seq: number;
   private definition: WorkflowDefinition;
   private graphChanged = false;
+  private capWarned = false;
   private readonly dirty = new Set<string>();
   private readonly pending: ExecutionEvent[] = [];
   private finished: {
@@ -331,6 +354,16 @@ class RunSession {
       return latest;
     }
 
+    if (this.activations.length >= MAX_ACTIVATIONS_PER_RUN) {
+      if (!this.capWarned) {
+        this.warnings.push(
+          `Run "${this.execution.externalId}": stopped recording new steps at the ${MAX_ACTIVATIONS_PER_RUN}-step limit`,
+        );
+        this.capWarned = true;
+      }
+      return null;
+    }
+
     if (!this.ensureNode(step, label, at, options.after)) return null;
 
     const parent = this.parentActivationFor(step);
@@ -437,14 +470,30 @@ class RunSession {
       });
     }
 
-    // "Will retry" followed by the end of the run means that failure was the last one.
+    /*
+     * "Will retry" followed by the end of the run means that failure was the last one.
+     * The event re-reports that attempt as final -- the UI is driven by events, so
+     * without it the node would show "retrying" forever. It carries the attempt's own
+     * time and number, so the reducer replaces the attempt rather than adding one.
+     */
     for (const activation of this.activations) {
       if (!awaitingRetry(activation)) continue;
+      const last = activation.attempts.at(-1)!;
+      const endedAt = new Date(last.completedAt);
       activation.status = 'failed';
-      activation.completedAt = new Date(activation.attempts.at(-1)!.completedAt);
-      activation.durationMs = elapsed(activation.startedAt, activation.completedAt);
+      activation.completedAt = endedAt;
+      activation.durationMs = elapsed(activation.startedAt, endedAt);
       activation.maxAttempts = activation.attemptCount;
       this.dirty.add(activation.id);
+      this.emitNode(activation, endedAt, {
+        type: 'node.failed',
+        payload: {
+          attempt: last.attempt,
+          durationMs: last.durationMs,
+          error: last.error ?? activation.error ?? { message: 'Step failed' },
+          retriesExhausted: true,
+        },
+      });
     }
 
     const terminalError =
@@ -465,7 +514,7 @@ class RunSession {
       records,
       stats,
       totalDurationMs: durationMs,
-      capReached: false,
+      capReached: this.activations.length >= MAX_ACTIVATIONS_PER_RUN,
       deadlockedNodes: [],
       baseline: await loadBaseline(this.execution.workflowId, this.execution.id),
     });
@@ -737,13 +786,50 @@ class RunSession {
 
 /* ---------------------------------------------------------------- helpers ---- */
 
-async function lockExecution(tx: Tx, userId: string, runId: string): Promise<ExecutionRow | null> {
+/** Per-run serialisation key. Workflow names are unique per user for reported runs. */
+function runKey(userId: string, workflow: string, runId: string): string {
+  return JSON.stringify([userId, workflow, runId]);
+}
+
+async function lockExecution(tx: Tx, workflowId: string, runId: string): Promise<ExecutionRow | null> {
   const [row] = await tx
     .select()
     .from(executions)
-    .where(and(eq(executions.userId, userId), eq(executions.externalId, runId)))
+    .where(and(eq(executions.workflowId, workflowId), eq(executions.externalId, runId)))
     .for('update');
   return row ?? null;
+}
+
+/** Drops events whose `id` this run has already applied -- a resent batch. */
+async function withoutSeenEvents(tx: Tx, executionId: string, events: IngestEvent[]): Promise<IngestEvent[]> {
+  const ids = events.flatMap((e) => (e.id ? [e.id] : []));
+  if (ids.length === 0) return events;
+  const seen = await tx
+    .select({ eventId: ingestEventIds.eventId })
+    .from(ingestEventIds)
+    .where(and(eq(ingestEventIds.executionId, executionId), inArray(ingestEventIds.eventId, ids)));
+  const seenIds = new Set(seen.map((row) => row.eventId));
+  return events.filter((e) => !e.id || !seenIds.has(e.id));
+}
+
+/** The same id twice in one batch is the same event, however it got there. */
+function dedupeWithinBatch(events: IngestEvent[]): IngestEvent[] {
+  const ids = new Set<string>();
+  return events.filter((e) => {
+    if (!e.id) return true;
+    if (ids.has(e.id)) return false;
+    ids.add(e.id);
+    return true;
+  });
+}
+
+/**
+ * Remembered even when an event was ignored (say, it arrived after the run ended): a
+ * resend of it should still count as a duplicate, not as a fresh event to reject again.
+ */
+async function recordEventIds(tx: Tx, executionId: string, events: IngestEvent[]) {
+  const rows = events.flatMap((e) => (e.id ? [{ executionId, eventId: e.id }] : []));
+  if (rows.length > 0) await tx.insert(ingestEventIds).values(rows).onConflictDoNothing();
 }
 
 async function ensureWorkflow(tx: Tx, userId: string, name: string): Promise<string> {
@@ -770,10 +856,6 @@ async function ensureWorkflow(tx: Tx, userId: string, name: string): Promise<str
 /** The incoming value in an upsert's `do update`. */
 function sqlExcluded(column: string) {
   return sql.raw(`excluded.${column}`);
-}
-
-function first<T>(items: T[]): T {
-  return items[0]!;
 }
 
 function timeOf(event: IngestEvent, fallback: Date): Date {

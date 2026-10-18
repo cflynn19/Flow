@@ -97,15 +97,20 @@ function ExecutionView() {
    * A reported run has no graph up front -- each new step adds a node as it is reported.
    * When the stream mentions a node this snapshot does not have, fetch the newer one.
    */
-  const hasUnknownNode = useMemo(() => {
-    if (!definition) return false;
+  // Keyed on *which* nodes are missing, not just whether any are: a fetch that lands
+  // before a second new step is committed must not stop the page asking for that one.
+  const unknownNodes = useMemo(() => {
+    if (!definition) return '';
     const known = new Set(definition.nodes.map((node) => node.id));
-    return Object.keys(state.byNodeId).some((nodeId) => !known.has(nodeId));
+    return Object.keys(state.byNodeId)
+      .filter((nodeId) => !known.has(nodeId))
+      .sort()
+      .join('\n');
   }, [definition, state.byNodeId]);
 
   useEffect(() => {
-    if (hasUnknownNode) void refetch();
-  }, [hasUnknownNode, refetch]);
+    if (unknownNodes) void refetch();
+  }, [unknownNodes, refetch]);
 
   // <ReactFlow fitView> only fits on mount, so a graph that grows mid-run would push its
   // newest steps off-screen. Keying the canvas on the node count remounts it -- and so

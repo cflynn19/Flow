@@ -181,8 +181,10 @@ export function executionReducer(
           durationMs: event.payload.retriesExhausted
             ? elapsed(current.startedAt, event.ts)
             : current.durationMs,
+          // A reported run that ends while a step awaits its retry re-reports that
+          // attempt as final. It is the same attempt, so it replaces the record.
           attempts: [
-            ...current.attempts,
+            ...current.attempts.filter((a) => a.attempt !== event.payload.attempt),
             {
               attempt: event.payload.attempt,
               startedAt: shift(event.ts, -event.payload.durationMs),

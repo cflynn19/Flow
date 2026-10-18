@@ -16,6 +16,12 @@ import {
 /** The node budget the shared definition schema allows. */
 export const MAX_TRACE_NODES = 200;
 
+/**
+ * Step executions recorded per run. A loop reporting without bound would otherwise grow
+ * the run forever; the engine's own cap is 500 for the same reason.
+ */
+export const MAX_ACTIVATIONS_PER_RUN = 1000;
+
 const COLUMN_WIDTH = 260;
 const ROW_HEIGHT = 110;
 

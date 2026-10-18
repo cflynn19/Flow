@@ -12,7 +12,7 @@ and see exactly what happened.
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![Fastify](https://img.shields.io/badge/Fastify-5-000000?logo=fastify&logoColor=white)](https://fastify.dev/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![Tests](https://img.shields.io/badge/tests-97%20passing-3fb950)](#testing)
+[![Tests](https://img.shields.io/badge/tests-102%20passing-3fb950)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 <img src="docs/images/demo.gif" alt="A workflow executing live: nodes move from pending to running to success, a retry fires, and the timeline fills in" width="880">
@@ -151,7 +151,9 @@ npm run api-key -- demo@flow.dev "My app"
 ```
 
 **2. Send events** to `POST /ingest/events` as your code runs. Events sharing a `runId`
-form one run, and the first event for a new `workflow` name creates that workflow.
+and `workflow` form one run, and the first event for a new `workflow` name creates that
+workflow. Give each event a unique `id` and resending it is harmless: Flow skips ids a run
+has already seen, so a client can safely retry a request that timed out.
 
 ```bash
 curl -X POST http://localhost:4000/ingest/events \
@@ -171,10 +173,10 @@ cleanup steps and a retried storage call:
 FLOW_API_KEY=flow_... node examples/report-run.mjs
 ```
 
-[`examples/report-run.mjs`](examples/report-run.mjs) also contains a ~50-line reporter you
+[`examples/report-run.mjs`](examples/report-run.mjs) also contains a small reporter you
 can copy into your own code.
 
-| Event | Fields (beyond `runId`, `workflow`, optional `ts`) |
+| Event | Fields (beyond `runId`, `workflow`, optional `id` and `ts`) |
 | --- | --- |
 | `run.started` | `input?` |
 | `step.started` | `step`, `label?`, `input?`, `after?: string[]`, `maxAttempts?` |
@@ -195,15 +197,17 @@ for the same step. They become attempts of one node, exactly like engine retries
 
 **Runs that go quiet** fail after `INGEST_IDLE_TIMEOUT_MS` (15 minutes by default) with
 `timed_out`, so a crashed process cannot leave a run "running" forever. A step still
-open when its run ends is marked failed with `step_unfinished`.
+open when its run ends is marked failed with `step_unfinished`. A run records at most
+1,000 step executions; beyond that, new steps are ignored and the run is flagged.
 
 Reported workflows are read-only in Flow: their graph comes from the app, and Flow cannot
 run them.
 
-> **Current limits:** events are not deduplicated, so a client that retries a request
-> after a timeout can record a step twice. Keys are managed from the command line (or
-> `GET`/`POST`/`DELETE /api-keys`); there is no settings page yet. `npm run db:seed`
-> wipes all data, keys included.
+> **Current limits:** steps are inferred from events in the order Flow *receives* them,
+> so send a run's events in order — await each report, or batch them — rather than
+> firing requests concurrently. Events without an `id` cannot be deduplicated. Keys are
+> managed from the command line (or `GET`/`POST`/`DELETE /api-keys`); there is no
+> settings page yet. `npm run db:seed` wipes all data, keys included.
 
 ---
 
@@ -343,6 +347,7 @@ runs, retried runs, and runs that fail outright.
 users              id · email · password_hash · name · created_at
 sessions           id (cookie token) · user_id · expires_at
 api_keys           id · user_id · name · token_hash · prefix · created_at · last_used_at
+ingest_event_ids   execution_id · event_id          (resent events are skipped)
 workflows          id · user_id · name · description · source · definition(jsonb)
                    timestamps
 executions         id · seq · workflow_id · user_id · status · trigger_input(jsonb)
@@ -469,12 +474,12 @@ quiet until there are at least three.
 ## Testing
 
 ```bash
-npm test          # Vitest: API (60) + web (23)
+npm test          # Vitest: API (64) + web (24)
 npm run test:e2e  # Playwright (14)
 npm run typecheck # tsc --noEmit across all three workspaces
 ```
 
-**97 tests**, run against a real PostgreSQL rather than a mock — the engine leans on
+**102 tests**, run against a real PostgreSQL rather than a mock — the engine leans on
 `jsonb`, `distinct on` and filtered aggregates.
 
 - **Engine** — sequential ordering and payload threading; parallel branches asserted to
@@ -488,9 +493,10 @@ npm run typecheck # tsc --noEmit across all three workspaces
   sequence asserted gap-free.
 - **Ingest** — API key auth and revocation; graph inference for chains, fan-out and
   fan-in, including across separate requests; explicit `after`; retries as attempts;
-  exhausted retries flagged; unfinished steps; late events ignored; per-account run
-  isolation; live broadcast continuing the sequence; idle timeout, and restarts leaving
-  reported runs alone.
+  exhausted retries flagged; unfinished steps; late events ignored; per-account and
+  per-workflow run isolation; resent events skipped by id; the per-run step limit; live
+  broadcast continuing the sequence; idle timeout, and restarts leaving reported runs
+  alone.
 - **Web** — the execution reducer through `running → failed → retrying → success`,
   duplicate suppression, multi-activation loops; canvas node rendering for every status;
   the canvas↔definition round trip.
