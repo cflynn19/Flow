@@ -1,6 +1,6 @@
 import { formatRelativeTime } from '@flow/shared';
 import { Command } from 'cmdk';
-import { GitBranch, History, LayoutDashboard, Play, Plus } from 'lucide-react';
+import { GitBranch, History, KeyRound, LayoutDashboard, Play, Plus } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { StatusDot } from '@/components/StatusDot';
@@ -101,6 +101,9 @@ export function CommandPalette({
             </Item>
             <Item onSelect={() => go('/app/workflows/new')} icon={<Plus />}>
               New workflow
+            </Item>
+            <Item onSelect={() => go('/app/settings/api-keys')} icon={<KeyRound />}>
+              API keys
             </Item>
           </Group>
 

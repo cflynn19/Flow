@@ -1,4 +1,5 @@
 import type {
+  CreateApiKeyInput,
   CreateWorkflowInput,
   ExecuteWorkflowInput,
   UpdateWorkflowInput,
@@ -20,6 +21,7 @@ export const keys = {
     ['executions', params] as const,
   execution: (id: string) => ['executions', id] as const,
   executionEvents: (id: string) => ['executions', id, 'events'] as const,
+  apiKeys: ['api-keys'] as const,
 };
 
 export function useStats() {
@@ -101,5 +103,25 @@ export function useRunWorkflow() {
       void client.invalidateQueries({ queryKey: keys.workflows });
       void client.invalidateQueries({ queryKey: keys.stats });
     },
+  });
+}
+
+export function useApiKeys() {
+  return useQuery({ queryKey: keys.apiKeys, queryFn: () => api.listApiKeys().then((r) => r.apiKeys) });
+}
+
+export function useCreateApiKey() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input: CreateApiKeyInput) => api.createApiKey(input),
+    onSuccess: () => void client.invalidateQueries({ queryKey: keys.apiKeys }),
+  });
+}
+
+export function useDeleteApiKey() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.deleteApiKey(id),
+    onSuccess: () => void client.invalidateQueries({ queryKey: keys.apiKeys }),
   });
 }

@@ -9,6 +9,7 @@ import { useAuth } from '@/features/auth/AuthContext';
 import { DashboardPage } from '@/features/dashboard/DashboardPage';
 import { HistoryPage } from '@/features/history/HistoryPage';
 import { LandingPage } from '@/features/landing/LandingPage';
+import { ApiKeysPage } from '@/features/settings/ApiKeysPage';
 import { NewWorkflowPage } from '@/features/workflows/NewWorkflowPage';
 import { WorkflowsPage } from '@/features/workflows/WorkflowsPage';
 
@@ -70,6 +71,7 @@ export function App() {
             }
           />
           <Route path="executions" element={<HistoryPage />} />
+          <Route path="settings/api-keys" element={<ApiKeysPage />} />
         </Route>
 
         <Route path="*" element={<NotFound />} />

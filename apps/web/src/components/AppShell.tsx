@@ -1,4 +1,12 @@
-import { ChevronDown, GitBranch, History, LayoutDashboard, LogOut, Search } from 'lucide-react';
+import {
+  ChevronDown,
+  GitBranch,
+  History,
+  KeyRound,
+  LayoutDashboard,
+  LogOut,
+  Search,
+} from 'lucide-react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { CommandPalette, useCommandPalette } from '@/components/CommandPalette';
 import { Kbd } from '@/components/Kbd';
@@ -81,6 +89,11 @@ export function AppShell() {
               <p className="text-[13px] font-medium text-text">{user?.name}</p>
               <p className="truncate font-mono text-[11px] text-text-subtle">{user?.email}</p>
             </div>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => navigate('/app/settings/api-keys')}>
+              <KeyRound />
+              API keys
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
               destructive

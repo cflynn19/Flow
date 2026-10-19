@@ -1,5 +1,7 @@
 import type {
   ApiError,
+  ApiKey,
+  CreateApiKeyInput,
   CreateWorkflowInput,
   DashboardStats,
   Execution,
@@ -99,4 +101,10 @@ export const api = {
     request<{ events: ExecutionEvent[] }>(`/executions/${id}/events`),
 
   stats: () => request<{ stats: DashboardStats }>('/stats'),
+
+  listApiKeys: () => request<{ apiKeys: ApiKey[] }>('/api-keys'),
+  /** The response is the only place the key itself ever appears. */
+  createApiKey: (input: CreateApiKeyInput) =>
+    post<{ apiKey: ApiKey; key: string }>('/api-keys', input),
+  deleteApiKey: (id: string) => request<void>(`/api-keys/${id}`, { method: 'DELETE' }),
 };

@@ -12,7 +12,7 @@ and see exactly what happened.
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![Fastify](https://img.shields.io/badge/Fastify-5-000000?logo=fastify&logoColor=white)](https://fastify.dev/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![Tests](https://img.shields.io/badge/tests-102%20passing-3fb950)](#testing)
+[![Tests](https://img.shields.io/badge/tests-103%20passing-3fb950)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 <img src="docs/images/demo.gif" alt="A workflow executing live: nodes move from pending to running to success, a retry fires, and the timeline fills in" width="880">
@@ -144,7 +144,9 @@ Flow can show the workflows your app already runs: a background job, a serverles
 function, an agent loop. The app reports each step as it happens, and those runs get the
 same live canvas, timeline, inspector and anomaly rules as the ones you draw.
 
-**1. Create an API key** for your account. It is printed once; only a hash is stored.
+**1. Create an API key** under **API keys** in the account menu (or ⌘K → "API keys").
+It is shown once, with a ready-to-run curl command; only a hash is stored. From the
+command line instead:
 
 ```bash
 npm run api-key -- demo@flow.dev "My app"
@@ -205,9 +207,8 @@ run them.
 
 > **Current limits:** steps are inferred from events in the order Flow *receives* them,
 > so send a run's events in order — await each report, or batch them — rather than
-> firing requests concurrently. Events without an `id` cannot be deduplicated. Keys are
-> managed from the command line (or `GET`/`POST`/`DELETE /api-keys`); there is no
-> settings page yet. `npm run db:seed` wipes all data, keys included.
+> firing requests concurrently. Events without an `id` cannot be deduplicated.
+> `npm run db:seed` wipes all data, keys included.
 
 ---
 
@@ -475,11 +476,11 @@ quiet until there are at least three.
 
 ```bash
 npm test          # Vitest: API (64) + web (24)
-npm run test:e2e  # Playwright (14)
+npm run test:e2e  # Playwright (15)
 npm run typecheck # tsc --noEmit across all three workspaces
 ```
 
-**102 tests**, run against a real PostgreSQL rather than a mock — the engine leans on
+**103 tests**, run against a real PostgreSQL rather than a mock — the engine leans on
 `jsonb`, `distinct on` and filtered aggregates.
 
 - **Engine** — sequential ordering and payload threading; parallel branches asserted to
@@ -501,8 +502,9 @@ npm run typecheck # tsc --noEmit across all three workspaces
   duplicate suppression, multi-activation loops; canvas node rendering for every status;
   the canvas↔definition round trip.
 - **E2E** — sign up → build a workflow → run it → inspect a node → find it in history; a
-  run whose node exhausts its retries; keyboard and command-palette flows; plus a
-  regression suite pinning previously-fixed bugs.
+  run whose node exhausts its retries; keyboard and command-palette flows; creating an
+  API key, using it, and revoking it; plus a regression suite pinning previously-fixed
+  bugs.
 
 A GitHub Actions workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs
 all of it against a PostgreSQL service container.
