@@ -139,11 +139,14 @@ export function Timeline({
 }
 
 /** Round tick marks so the axis reads 0 / 500ms / 1.00s rather than arbitrary numbers. */
-function buildTicks(totalMs: number): number[] {
+export function buildTicks(totalMs: number): number[] {
   const targetCount = 5;
   const rough = totalMs / targetCount;
   const magnitude = 10 ** Math.floor(Math.log10(rough));
-  const step = [1, 2, 2.5, 5, 10].map((m) => m * magnitude).find((s) => s >= rough) ?? magnitude * 10;
+  const nice = [1, 2, 2.5, 5, 10].map((m) => m * magnitude).find((s) => s >= rough) ?? magnitude * 10;
+  // Ticks are labelled and keyed in whole milliseconds, so a finer step on a run of a few
+  // milliseconds would round to repeats.
+  const step = Math.max(1, nice);
 
   const ticks: number[] = [];
   for (let value = 0; value <= totalMs; value += step) ticks.push(Math.round(value));

@@ -12,7 +12,7 @@ and see exactly what happened.
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![Fastify](https://img.shields.io/badge/Fastify-5-000000?logo=fastify&logoColor=white)](https://fastify.dev/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![Tests](https://img.shields.io/badge/tests-103%20passing-3fb950)](#testing)
+[![Tests](https://img.shields.io/badge/tests-111%20passing-3fb950)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 <img src="docs/images/demo.gif" alt="A workflow executing live: nodes move from pending to running to success, a retry fires, and the timeline fills in" width="880">
@@ -191,11 +191,23 @@ can copy into your own code.
 had *finished* before it started, minus any that were themselves followed by another
 finished step. Sequential code draws as a chain, `Promise.all` as a fan-out, and the step
 after it as a join. When timing is ambiguous (two fast steps that look sequential, say),
-`after` names the parents explicitly. A workflow's graph is the union of all its runs, so
-it shows every path the app has taken.
+`after` names the parents explicitly. A workflow's graph is the union of its finished
+runs, so it shows every path the app has taken.
+
+**Timing comes from `ts`, not arrival order.** If a step's result reaches Flow after a
+step that started later (two requests racing), the later step's parents are worked out
+again once the result arrives, so concurrent reporting still draws the right graph. A
+batch whose events all carry `ts` is applied in `ts` order. Without `ts`, an event is
+timed when Flow receives it, so send those in order.
 
 **Retries** are a `step.failed` with `willRetry: true` followed by another `step.started`
 for the same step. They become attempts of one node, exactly like engine retries.
+
+**Each run in a batch is recorded on its own.** If one can't be saved, the response is
+still `202`, the others are kept, and the failed run is listed in `errors`. None of its
+events were saved, so they can be resent. If no run in the batch could be saved, the
+response is a `500` and the whole batch can be retried. A NUL character (`\u0000`),
+which PostgreSQL can't store, is saved as `\ufffd` rather than failing the request.
 
 **Runs that go quiet** fail after `INGEST_IDLE_TIMEOUT_MS` (15 minutes by default) with
 `timed_out`, so a crashed process cannot leave a run "running" forever. A step still
@@ -205,10 +217,9 @@ open when its run ends is marked failed with `step_unfinished`. A run records at
 Reported workflows are read-only in Flow: their graph comes from the app, and Flow cannot
 run them.
 
-> **Current limits:** steps are inferred from events in the order Flow *receives* them,
-> so send a run's events in order — await each report, or batch them — rather than
-> firing requests concurrently. Events without an `id` cannot be deduplicated.
-> `npm run db:seed` wipes all data, keys included.
+> **Current limits:** a step's own events must still arrive in order — its `step.started`
+> before its result. Events without an `id` cannot be deduplicated. There is no rate
+> limiting yet. `npm run db:seed` wipes all data, keys included.
 
 ---
 
@@ -360,7 +371,7 @@ node_executions    id · execution_id · node_id · node_kind · label · status
                    started_at · completed_at · duration_ms
                    input(jsonb) · output(jsonb) · error(jsonb)
                    parent_node_execution_id · branch_depth · activation_index · tool_calls
-                   attempt_started_at
+                   attempt_started_at · declared_after(jsonb)
 execution_events   id · execution_id · seq · node_id · type · ts · payload(jsonb)
 ```
 
@@ -475,12 +486,12 @@ quiet until there are at least three.
 ## Testing
 
 ```bash
-npm test          # Vitest: API (64) + web (24)
+npm test          # Vitest: API (70) + web (26)
 npm run test:e2e  # Playwright (15)
 npm run typecheck # tsc --noEmit across all three workspaces
 ```
 
-**103 tests**, run against a real PostgreSQL rather than a mock — the engine leans on
+**111 tests**, run against a real PostgreSQL rather than a mock — the engine leans on
 `jsonb`, `distinct on` and filtered aggregates.
 
 - **Engine** — sequential ordering and payload threading; parallel branches asserted to
@@ -495,12 +506,13 @@ npm run typecheck # tsc --noEmit across all three workspaces
 - **Ingest** — API key auth and revocation; graph inference for chains, fan-out and
   fan-in, including across separate requests; explicit `after`; retries as attempts;
   exhausted retries flagged; unfinished steps; late events ignored; per-account and
-  per-workflow run isolation; resent events skipped by id; the per-run step limit; live
-  broadcast continuing the sequence; idle timeout, and restarts leaving reported runs
-  alone.
+  per-workflow run isolation; resent events skipped by id; out-of-order delivery
+  corrected from timestamps; one failing run not taking down the rest of its batch; NUL
+  characters stored safely; the per-run step limit; live broadcast continuing the
+  sequence; idle timeout, and restarts leaving reported runs alone.
 - **Web** — the execution reducer through `running → failed → retrying → success`,
   duplicate suppression, multi-activation loops; canvas node rendering for every status;
-  the canvas↔definition round trip.
+  the canvas↔definition round trip; timeline ticks on runs of a few milliseconds.
 - **E2E** — sign up → build a workflow → run it → inspect a node → find it in history; a
   run whose node exhausts its retries; keyboard and command-palette flows; creating an
   API key, using it, and revoking it; plus a regression suite pinning previously-fixed

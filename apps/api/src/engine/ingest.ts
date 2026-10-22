@@ -63,10 +63,22 @@ function serialised<T>(key: string, task: () => Promise<T>): Promise<T> {
   return next;
 }
 
+export interface IngestOptions {
+  receivedAt?: Date;
+  /** Told about each run that could not be recorded, with the underlying error. */
+  onRunError?: (error: unknown, run: { runId: string; workflow: string }) => void;
+}
+
+/**
+ * Applies a batch, one run at a time. Each run commits on its own, so one that cannot be
+ * recorded is reported in `errors` without undoing the others. If none could be
+ * recorded, the first error is thrown instead -- nothing was saved, and the caller
+ * should see a failure it can retry rather than a 202.
+ */
 export async function ingestEvents(
   userId: string,
   events: IngestEvent[],
-  receivedAt = new Date(),
+  { receivedAt = new Date(), onRunError }: IngestOptions = {},
 ): Promise<IngestResult> {
   // Order is preserved within a run; runs in one batch are independent of each other.
   // A run is identified by workflow *and* runId, since an app may reuse ids across them.
@@ -78,17 +90,37 @@ export async function ingestEvents(
     byRun.set(key, group);
   }
 
-  const result: IngestResult = { accepted: 0, ignored: 0, duplicates: 0, runs: [], warnings: [] };
+  const result: IngestResult = {
+    accepted: 0,
+    ignored: 0,
+    duplicates: 0,
+    runs: [],
+    errors: [],
+    warnings: [],
+  };
+  const failures: { error: unknown; runId: string; workflow: string }[] = [];
   for (const [key, { workflow, runId, events: runEvents }] of byRun) {
-    const outcome = await serialised(key, () =>
-      applyRunEvents(userId, workflow, runId, runEvents, receivedAt),
-    );
+    let outcome: RunOutcome;
+    try {
+      outcome = await serialised(key, () => applyRunEvents(userId, workflow, runId, runEvents, receivedAt));
+    } catch (error) {
+      failures.push({ error, runId, workflow });
+      result.errors.push({
+        runId,
+        workflow,
+        events: runEvents.length,
+        message: 'This run could not be recorded. None of its events in this batch were saved; resend them.',
+      });
+      continue;
+    }
     result.accepted += outcome.accepted;
     result.ignored += outcome.ignored;
     result.duplicates += outcome.duplicates;
     result.warnings.push(...outcome.warnings);
     result.runs.push({ runId, workflow, executionId: outcome.executionId, status: outcome.status });
   }
+  if (failures.length > 0 && result.runs.length === 0) throw failures[0]!.error;
+  for (const { error, ...run } of failures) onRunError?.(error, run);
   return result;
 }
 
@@ -108,6 +140,7 @@ async function applyRunEvents(
   events: IngestEvent[],
   receivedAt: Date,
 ): Promise<RunOutcome> {
+  events = inTimeOrder(events);
   const { session, outcome } = await db.transaction(async (tx) => {
     const workflowId = await ensureWorkflow(tx, userId, workflowName);
     let execution = await lockExecution(tx, workflowId, runId);
@@ -377,6 +410,7 @@ class RunSession {
       parent?.id ?? null,
     );
     activation.maxAttempts = Math.max(1, options.maxAttempts ?? 1);
+    activation.declaredAfter = options.after?.length ? options.after : null;
     this.emitStarted(activation, at);
     return activation;
   }
@@ -396,6 +430,7 @@ class RunSession {
       type: 'node.completed',
       payload: { attempt: activation.attemptCount, durationMs, output: output ?? null },
     });
+    this.reinferAfterLateFinish(activation, at);
     return true;
   }
 
@@ -424,6 +459,7 @@ class RunSession {
       type: 'node.failed',
       payload: { attempt: activation.attemptCount, durationMs, error, retriesExhausted: !willRetry },
     });
+    if (!willRetry) this.reinferAfterLateFinish(activation, at);
     if (willRetry) {
       this.emitNode(activation, at, {
         type: 'node.retrying',
@@ -553,6 +589,8 @@ class RunSession {
             output: sqlExcluded('output'),
             error: sqlExcluded('error'),
             attemptStartedAt: sqlExcluded('attempt_started_at'),
+            parentNodeExecutionId: sqlExcluded('parent_node_execution_id'),
+            branchDepth: sqlExcluded('branch_depth'),
           },
         });
     }
@@ -570,10 +608,10 @@ class RunSession {
       );
     }
 
-    if (this.graphChanged) {
-      this.definition = layout(this.definition);
-      await this.mergeIntoWorkflow();
-    }
+    if (this.graphChanged) this.definition = layout(this.definition);
+    // Only a finished run's graph is final: until then a late event can still move an
+    // edge, and an edge merged into the workflow early would stay there for good.
+    if (this.finished) await this.mergeIntoWorkflow();
 
     await tx
       .update(executions)
@@ -617,14 +655,7 @@ class RunSession {
     const parents =
       explicit.length > 0
         ? explicit
-        : inferParents(
-            this.activations.map((a) => ({
-              nodeId: a.nodeId,
-              startedAt: a.startedAt?.getTime() ?? 0,
-              completedAt: a.status === 'running' ? null : (a.completedAt?.getTime() ?? null),
-            })),
-            at.getTime(),
-          );
+        : inferParents(this.timeline(), at.getTime());
 
     this.definition = {
       nodes: [...this.definition.nodes, stepNode(step, label)],
@@ -635,8 +666,71 @@ class RunSession {
   }
 
   /**
-   * The workflow's own graph is the union of every run of it, so the editor shows each
-   * path the app has ever taken. Locked, because concurrent runs extend it at once.
+   * Corrects the graph when a step's result arrives after a step that started later.
+   *
+   * Parents are inferred when a step first appears, from what is known then. If the app
+   * reports concurrently, B's start can arrive before A's finish even though A finished
+   * first, and B gets hung off the wrong parent. Once A's finish arrives, every step that
+   * started after it is inferred again with the full picture. Events that arrive in
+   * order never get here: no step can have started after a finish that is still news.
+   */
+  private reinferAfterLateFinish(finished: NodeExecutionRow, at: Date) {
+    const finishedAt = at.getTime();
+    const firstStarts = new Map<string, NodeExecutionRow>();
+    for (const activation of this.activations) {
+      if (!firstStarts.has(activation.nodeId)) firstStarts.set(activation.nodeId, activation);
+    }
+
+    const later = [...firstStarts.values()]
+      .filter(
+        (a) =>
+          a.nodeId !== finished.nodeId &&
+          a.nodeId !== INGEST_START_NODE_ID &&
+          (a.startedAt?.getTime() ?? 0) > finishedAt,
+      )
+      .sort((a, b) => a.startedAt!.getTime() - b.startedAt!.getTime());
+    if (later.length === 0) return;
+
+    const nodeIds = new Set(this.definition.nodes.map((n) => n.id));
+    const timeline = this.timeline();
+    for (const first of later) {
+      const step = first.nodeId;
+      if (!nodeIds.has(step)) continue;
+      // Dependencies the app declared do not depend on timing.
+      if ((first.declaredAfter ?? []).some((id) => id !== step && nodeIds.has(id))) continue;
+
+      const current = this.definition.edges.filter((e) => e.target === step).map((e) => e.source);
+      const parents = inferParents(timeline, first.startedAt!.getTime(), new Set(current));
+      if (parents.length === current.length && parents.every((p) => current.includes(p))) continue;
+
+      this.definition = {
+        nodes: this.definition.nodes,
+        edges: [
+          ...this.definition.edges.filter((e) => e.target !== step),
+          ...parents.map((parent) => traceEdge(parent, step)),
+        ],
+      };
+      this.graphChanged = true;
+
+      const parent = this.latestActivation(parents[0]!);
+      first.parentNodeExecutionId = parent?.id ?? null;
+      first.branchDepth = (parent?.branchDepth ?? 0) + 1;
+      this.dirty.add(first.id);
+    }
+  }
+
+  /** Every activation's span, as inference sees it: a running step has not finished. */
+  private timeline() {
+    return this.activations.map((a) => ({
+      nodeId: a.nodeId,
+      startedAt: a.startedAt?.getTime() ?? 0,
+      completedAt: a.status === 'running' ? null : (a.completedAt?.getTime() ?? null),
+    }));
+  }
+
+  /**
+   * The workflow's own graph is the union of every finished run of it, so the editor
+   * shows each path the app has taken. Locked, because concurrent runs extend it at once.
    */
   private async mergeIntoWorkflow() {
     const [workflow] = await this.tx
@@ -698,6 +792,7 @@ class RunSession {
       activationIndex: this.activations.filter((a) => a.nodeId === nodeId).length,
       toolCalls: 0,
       attemptStartedAt: at,
+      declaredAfter: null,
     };
     this.activations.push(activation);
     this.dirty.add(activation.id);
@@ -856,6 +951,19 @@ async function ensureWorkflow(tx: Tx, userId: string, name: string): Promise<str
 /** The incoming value in an upsert's `do update`. */
 function sqlExcluded(column: string) {
   return sql.raw(`excluded.${column}`);
+}
+
+/**
+ * A batch whose events all carry a timestamp is applied in timestamp order, so a client
+ * that queued events out of order still gets the graph its timings describe. Ties keep
+ * the order they were sent in. Without timestamps the send order is all there is.
+ */
+function inTimeOrder(events: IngestEvent[]): IngestEvent[] {
+  if (!events.every((e) => e.ts)) return events;
+  return events
+    .map((event, index) => ({ event, index, time: Date.parse(event.ts!) }))
+    .sort((a, b) => a.time - b.time || a.index - b.index)
+    .map(({ event }) => event);
 }
 
 function timeOf(event: IngestEvent, fallback: Date): Date {

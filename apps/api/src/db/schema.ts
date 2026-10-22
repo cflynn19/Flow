@@ -139,6 +139,11 @@ export const nodeExecutions = pgTable(
      * across separate requests, while the engine times an attempt within one call.
      */
     attemptStartedAt: timestamp('attempt_started_at', { withTimezone: true }),
+    /**
+     * The parents a reported step named with `after`. Kept so that correcting a graph
+     * built from out-of-order events leaves dependencies the app declared alone.
+     */
+    declaredAfter: jsonb('declared_after').$type<string[]>(),
   },
   (t) => [
     index('node_executions_execution_idx').on(t.executionId),

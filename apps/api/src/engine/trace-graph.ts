@@ -13,8 +13,9 @@ import {
  * produces, so a reported run renders on the same canvas as a simulated one.
  */
 
-/** The node budget the shared definition schema allows. */
+/** The node and edge budgets the shared definition schema allows. */
 export const MAX_TRACE_NODES = 200;
+export const MAX_TRACE_EDGES = 400;
 
 /**
  * Step executions recorded per run. A loop reporting without bound would otherwise grow
@@ -45,11 +46,21 @@ export interface TimedActivation {
  *
  * B starting does not hide A from C: A is only superseded by a step that has *finished*,
  * which is what lets two siblings both attach to A.
+ *
+ * A step that finished in the same millisecond another started counts as its parent: by
+ * default, since events applied in order put the finish first. When re-inferring after
+ * events arrived out of order, that order is lost, so `ties` names the only steps a tie
+ * may still count for -- the parents already chosen while the order was known.
  */
-export function inferParents(activations: TimedActivation[], startedAt: number): string[] {
+export function inferParents(
+  activations: TimedActivation[],
+  startedAt: number,
+  ties?: ReadonlySet<string>,
+): string[] {
   const finished = activations.filter(
     (a): a is TimedActivation & { completedAt: number } =>
-      a.completedAt !== null && a.completedAt <= startedAt,
+      a.completedAt !== null &&
+      (a.completedAt < startedAt || (a.completedAt === startedAt && (!ties || ties.has(a.nodeId)))),
   );
 
   const frontier = finished.filter(
@@ -96,7 +107,14 @@ export function mergeDefinitions(
   const edges = new Map(base.edges.map((e) => [e.id, e]));
   for (const edge of extra.edges) if (!edges.has(edge.id)) edges.set(edge.id, edge);
 
-  return { nodes: [...nodes.values()].slice(0, MAX_TRACE_NODES), edges: [...edges.values()] };
+  const kept = [...nodes.values()].slice(0, MAX_TRACE_NODES);
+  const ids = new Set(kept.map((n) => n.id));
+  return {
+    nodes: kept,
+    edges: [...edges.values()]
+      .filter((e) => ids.has(e.source) && ids.has(e.target))
+      .slice(0, MAX_TRACE_EDGES),
+  };
 }
 
 /**

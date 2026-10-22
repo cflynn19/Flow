@@ -12,7 +12,9 @@ export async function registerIngestRoutes(app: FastifyInstance) {
   app.post('/events', async (request, reply) => {
     const user = await requireApiKeyUser(request);
     const batch = parse(ingestBatchSchema, request.body);
-    const result = await ingestEvents(user.id, batch.events);
+    const result = await ingestEvents(user.id, batch.events, {
+      onRunError: (err, run) => request.log.error({ err, ...run }, 'Could not record a reported run'),
+    });
     return reply.status(202).send(result);
   });
 }

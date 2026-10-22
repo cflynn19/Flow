@@ -5,7 +5,7 @@ import {
   type IngestEvent,
   type Workflow,
 } from '@flow/shared';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../db/client.ts';
 import { executions } from '../db/schema.ts';
@@ -444,6 +444,169 @@ describe('delivery edge cases', () => {
     // 1000 activations: Start plus 999 of the loop.
     expect(detail.nodeExecutions).toHaveLength(1000);
     expect(detail.anomalies.map((a) => a.rule)).toContain('execution-cap-reached');
+  });
+});
+
+describe('out-of-order delivery', () => {
+  it('fixes the graph when a step result arrives after a later step started', async () => {
+    const client = await signUp();
+    const key = await issueKey(client);
+
+    // Reported concurrently: b's start overtakes a's completion on the way in.
+    await report(key, [{ type: 'step.started', step: 'a', ts: at(0) }]);
+    await report(key, [{ type: 'step.started', step: 'b', ts: at(20) }]);
+    await report(key, [{ type: 'step.completed', step: 'a', ts: at(10) }]);
+    const done = await report(key, [
+      { type: 'step.completed', step: 'b', ts: at(30) },
+      { type: 'run.completed', ts: at(31) },
+    ]);
+
+    const detail = await getExecution(client, done.json().runs[0].executionId);
+    expect(edgesOf(detail)).toEqual([`${INGEST_START_NODE_ID}->a`, 'a->b']);
+    const a = detail.nodeExecutions.find((n) => n.nodeId === 'a')!;
+    const b = detail.nodeExecutions.find((n) => n.nodeId === 'b')!;
+    expect(b).toMatchObject({ parentNodeExecutionId: a.id, branchDepth: a.branchDepth + 1 });
+
+    // The edge guessed before a's result arrived never reached the workflow's graph.
+    const app = await getApp();
+    const workflow: Workflow = (
+      await app.inject({ method: 'GET', url: `/workflows/${detail.workflowId}`, headers: { cookie: client.cookie } })
+    ).json().workflow;
+    const workflowEdges = workflow.definition.edges.map((e) => `${e.source}->${e.target}`).sort();
+    expect(workflowEdges).toEqual([`${INGEST_START_NODE_ID}->a`, 'a->b']);
+  });
+
+  it('applies a batch in timestamp order when every event has one', async () => {
+    const client = await signUp();
+    const key = await issueKey(client);
+    const response = await report(key, [
+      { type: 'step.completed', step: 'b', ts: at(30) },
+      { type: 'run.completed', ts: at(31) },
+      { type: 'step.started', step: 'a', ts: at(0) },
+      { type: 'step.started', step: 'b', ts: at(20) },
+      { type: 'step.completed', step: 'a', ts: at(10) },
+    ]);
+    expect(response.json()).toMatchObject({ accepted: 5, ignored: 0, runs: [{ status: 'success' }] });
+
+    const detail = await getExecution(client, response.json().runs[0].executionId);
+    expect(edgesOf(detail)).toEqual([`${INGEST_START_NODE_ID}->a`, 'a->b']);
+    expect(detail.nodeExecutions.filter((n) => n.nodeId !== INGEST_START_NODE_ID)).toHaveLength(2);
+  });
+
+  it('keeps send order for events without timestamps', async () => {
+    const client = await signUp();
+    const key = await issueKey(client);
+    // All four land at the same instant, so only their order says a and b overlapped.
+    const response = await report(key, [
+      { type: 'step.started', step: 'a' },
+      { type: 'step.started', step: 'b' },
+      { type: 'step.completed', step: 'a' },
+      { type: 'step.completed', step: 'b' },
+      { type: 'run.completed' },
+    ]);
+    const detail = await getExecution(client, response.json().runs[0].executionId);
+    expect(edgesOf(detail)).toEqual([`${INGEST_START_NODE_ID}->a`, `${INGEST_START_NODE_ID}->b`]);
+  });
+
+  it('leaves declared dependencies alone when correcting the graph', async () => {
+    const client = await signUp();
+    const key = await issueKey(client);
+    await report(key, [
+      { type: 'step.started', step: 'a', ts: at(0) },
+      { type: 'step.completed', step: 'a', ts: at(5) },
+      { type: 'step.started', step: 'b', ts: at(6) },
+      { type: 'step.started', step: 'c', ts: at(20), after: ['a'] },
+    ]);
+    // b finished before c started, but c said it depends on a alone.
+    const done = await report(key, [
+      { type: 'step.completed', step: 'b', ts: at(10) },
+      { type: 'step.completed', step: 'c', ts: at(30) },
+      { type: 'run.completed', ts: at(31) },
+    ]);
+    const detail = await getExecution(client, done.json().runs[0].executionId);
+    expect(edgesOf(detail)).toContain('a->c');
+    expect(edgesOf(detail)).not.toContain('b->c');
+  });
+});
+
+describe('failing delivery', () => {
+  /** Makes Postgres reject creating the run "boom", the way a real database fault would. */
+  async function withRejectedRun(test: () => Promise<void>) {
+    await db.execute(sql`
+      create or replace function test_reject_boom() returns trigger as $$
+      begin
+        if new.external_id = 'boom' then raise exception 'simulated database fault'; end if;
+        return new;
+      end $$ language plpgsql`);
+    await db.execute(sql`
+      create trigger test_reject_boom before insert on executions
+      for each row execute function test_reject_boom()`);
+    try {
+      await test();
+    } finally {
+      await db.execute(sql`drop trigger if exists test_reject_boom on executions`);
+      await db.execute(sql`drop function if exists test_reject_boom()`);
+    }
+  }
+
+  it('records the other runs in a batch when one cannot be recorded', async () => {
+    const client = await signUp();
+    const key = await issueKey(client);
+
+    await withRejectedRun(async () => {
+      const response = await report(key, [
+        { type: 'run.started', runId: 'ok' },
+        { type: 'step.started', runId: 'boom', step: 'a' },
+        { type: 'step.completed', runId: 'boom', step: 'a' },
+        { type: 'run.completed', runId: 'ok' },
+      ]);
+
+      expect(response.statusCode).toBe(202);
+      expect(response.json()).toMatchObject({
+        accepted: 2,
+        runs: [{ runId: 'ok', status: 'success' }],
+        errors: [{ runId: 'boom', workflow: 'deleteAccount', events: 2 }],
+      });
+      // Internal details stay in the server log.
+      expect(JSON.stringify(response.json())).not.toContain('simulated database fault');
+
+      // Nothing was recorded, so the batch is a failure the client should retry.
+      const alone = await report(key, [{ type: 'run.started', runId: 'boom' }]);
+      expect(alone.statusCode).toBe(500);
+    });
+
+    const app = await getApp();
+    const runs = await app.inject({ method: 'GET', url: '/executions', headers: { cookie: client.cookie } });
+    expect(runs.json().executions.map((e: { externalRunId: string }) => e.externalRunId)).toEqual(['ok']);
+  });
+
+  it('stores NUL characters as the replacement character instead of failing', async () => {
+    const client = await signUp();
+    const key = await issueKey(client);
+    const response = await report(key, [
+      { type: 'step.started', step: 'a', label: 'Parse\u0000file' },
+      { type: 'step.failed', step: 'a', error: { message: 'bad byte \u0000 at 4' } },
+      // An escaped backslash before "u0000" is ordinary text, not a NUL.
+      { type: 'run.failed', error: { message: 'literal \\u0000 text' } },
+    ]);
+    expect(response.statusCode).toBe(202);
+
+    const detail = await getExecution(client, response.json().runs[0].executionId);
+    const a = detail.nodeExecutions.find((n) => n.nodeId === 'a')!;
+    expect(a.label).toBe('Parse�file');
+    expect(a.error?.message).toBe('bad byte � at 4');
+    expect(detail.error?.message).toBe('literal \\u0000 text');
+
+    // Not just ingest: any JSON body.
+    const app = await getApp();
+    const created = await app.inject({
+      method: 'POST',
+      url: '/workflows',
+      headers: { cookie: client.cookie },
+      payload: { name: 'Nul\u0000name', description: null, definition: { nodes: [], edges: [] } },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().workflow.name).toBe('Nul�name');
   });
 });
 

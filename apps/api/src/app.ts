@@ -10,6 +10,7 @@ import { ZodError } from 'zod';
 import { env, isProduction } from './env.ts';
 import { SESSION_COOKIE, resolveSession } from './lib/auth.ts';
 import { AppError, unauthorized } from './lib/errors.ts';
+import { replaceNullEscapes } from './lib/json.ts';
 import { registerApiKeyRoutes } from './routes/api-keys.ts';
 import { registerAuthRoutes } from './routes/auth.ts';
 import { registerExecutionRoutes } from './routes/executions.ts';
@@ -34,6 +35,14 @@ export async function buildApp(): Promise<FastifyInstance> {
     origin: env.WEB_ORIGIN.split(',').map((o) => o.trim()),
     credentials: true,
   });
+
+  // Fastify's own JSON parsing (empty-body and prototype-poisoning checks included), run
+  // on text that no longer contains anything PostgreSQL refuses to store.
+  const parseJson = app.getDefaultJsonParser('error', 'ignore');
+  app.removeContentTypeParser('application/json');
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (request, body, done) =>
+    parseJson(request, replaceNullEscapes(body as string), done),
+  );
 
   app.decorateRequest('user', null);
 

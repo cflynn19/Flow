@@ -112,6 +112,13 @@ export const ingestResultSchema = z.object({
   runs: z.array(
     z.object({ runId: z.string(), workflow: z.string(), executionId: z.string(), status: z.string() }),
   ),
+  /**
+   * Runs that could not be recorded. Each run in a batch commits on its own, so the runs
+   * listed here saved nothing and their events can be resent; the others are unaffected.
+   */
+  errors: z.array(
+    z.object({ runId: z.string(), workflow: z.string(), events: z.number().int(), message: z.string() }),
+  ),
   warnings: z.array(z.string()),
 });
 export type IngestResult = z.infer<typeof ingestResultSchema>;
